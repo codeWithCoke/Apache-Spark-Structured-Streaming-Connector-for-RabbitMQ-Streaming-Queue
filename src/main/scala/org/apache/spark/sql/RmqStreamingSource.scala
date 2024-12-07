@@ -5,6 +5,7 @@ package org.apache.spark.sql
 
 import com.customStreamingSource.rabbitMQUtils.CachedStreamFactory
 import com.rabbitmq.stream.MessageHandler.Context
+import com.customStreamingSource.rabbitMQUtils.PathUtil
 import com.rabbitmq.stream._
 import org.apache.qpid.proton.amqp.messaging.Data
 import org.apache.spark.internal.Logging
@@ -26,7 +27,8 @@ class RmqStreamingSource(sqlContext: SQLContext, metadataPath: String, parameter
   private val queueName: String = parameters("rmq.queuename")
   private val fetchedCount: AtomicLong = new AtomicLong(0)
 
-  private val customOffsetCheckpointPath = Paths.get(parameters.getOrElse("rmq.offsetcheckpointpath", new URI(metadataPath).getPath)).resolve("customOffset")
+  val checkpointPath: String = PathUtil.convertToSystemPath(parameters.getOrDefault("rmq.offsetcheckpointpath", new URI(metadataPath).getPath))
+  private val customOffsetCheckpointPath = Paths.get(checkpointPath).resolve("customOffset")
   private val offsetManager: RmqOffsetManagerTrait = new RmqFileSystemRmqOffsetManager(customOffsetCheckpointPath)
   private val rmqEnv: Environment = CachedStreamFactory.getEnvironment(parameters)
   private val buffer: ConcurrentNavigableMap[Long, (Message, Context)] = new ConcurrentSkipListMap[Long, (Message, Context)]()
