@@ -2,14 +2,10 @@ package com.customStreamingSource.rabbitMQUtils
 
 import com.rabbitmq.stream.Environment
 
-import scala.collection.mutable
-
-object CachedStreamFactory {
-  private val environmentCache = mutable.Map[String, Environment]()
+object RmqEnvironmentFactory {
 
   def getEnvironment(option: Map[String, String]): Environment = synchronized {
-    // Using ConnectionOption's string representation as the cache key
-    val environment = environmentCache.getOrElseUpdate(option.toString, createEnvironment(option))
+    val environment = createEnvironment(option)
     environment
   }
 

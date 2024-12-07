@@ -3,7 +3,7 @@
 
 package org.apache.spark.sql
 
-import com.customStreamingSource.rabbitMQUtils.CachedStreamFactory
+import com.customStreamingSource.rabbitMQUtils.RmqEnvironmentFactory
 import com.rabbitmq.stream.MessageHandler.Context
 import com.customStreamingSource.rabbitMQUtils.PathUtil
 import com.rabbitmq.stream._
@@ -30,7 +30,7 @@ class RmqStreamingSource(sqlContext: SQLContext, metadataPath: String, parameter
   val checkpointPath: String = PathUtil.convertToSystemPath(parameters.getOrDefault("rmq.offsetcheckpointpath", new URI(metadataPath).getPath))
   private val customOffsetCheckpointPath = Paths.get(checkpointPath).resolve("customOffset")
   private val offsetManager: RmqOffsetManagerTrait = new RmqFileSystemRmqOffsetManager(customOffsetCheckpointPath)
-  private val rmqEnv: Environment = CachedStreamFactory.getEnvironment(parameters)
+  private val rmqEnv: Environment = RmqEnvironmentFactory.getEnvironment(parameters)
   private val buffer: ConcurrentNavigableMap[Long, (Message, Context)] = new ConcurrentSkipListMap[Long, (Message, Context)]()
   private val consumer: Consumer = startConsume(lastReadOffset + 1)
   @volatile private var lastReadOffset: Long = offsetManager.readLongFromFile().getOrElse(-1L)
