@@ -21,11 +21,11 @@ import java.util.concurrent.{ConcurrentNavigableMap, ConcurrentSkipListMap, Coun
 import scala.collection.convert.ImplicitConversions.{`map AsJavaMap`, `map AsScalaConcurrentMap`, `map AsScala`}
 
 class RmqStreamingSource(sqlContext: SQLContext, metadataPath: String, parameters: Map[String, String]) extends Source with Logging {
-  private val prefetch: Long = parameters.getOrElse("rmq.fetchsize", "2001L").toLong
-  private val readLimit: Long = parameters.getOrElse("rmq.maxbatchsize", "1000L").toLong
+  private val prefetch: Long = parameters.getOrElse("rmq.fetchsize", "2001").toLong
+  private val readLimit: Long = parameters.getOrElse("rmq.maxbatchsize", "1000").toLong
   private val queueName: String = parameters("rmq.queuename")
   private val fetchedCount: AtomicLong = new AtomicLong(0)
-  private val readTimeoutSecond: Long = parameters.getOrElse("rmq.readtimeout", "300L").toLong
+  private val readTimeoutSecond: Long = parameters.getOrElse("rmq.readtimeout", "300").toLong
 
   private val checkpointPath: String = PathUtil.convertToSystemPath(parameters.getOrDefault("rmq.offsetcheckpointpath", new URI(metadataPath).getPath))
   private val customOffsetCheckpointPath = Paths.get(checkpointPath).resolve("customOffset")
