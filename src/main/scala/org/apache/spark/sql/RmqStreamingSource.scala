@@ -3,9 +3,8 @@
 
 package org.apache.spark.sql
 
-import com.customStreamingSource.rabbitMQUtils.RmqEnvironmentFactory
+import com.customStreamingSource.rabbitMQUtils.{PathUtil, RmqEnvironmentFactory}
 import com.rabbitmq.stream.MessageHandler.Context
-import com.customStreamingSource.rabbitMQUtils.PathUtil
 import com.rabbitmq.stream._
 import org.apache.qpid.proton.amqp.messaging.Data
 import org.apache.spark.internal.Logging
@@ -18,22 +17,26 @@ import org.apache.spark.unsafe.types.UTF8String
 import java.net.URI
 import java.nio.file.Paths
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.{ConcurrentNavigableMap, ConcurrentSkipListMap}
-import scala.collection.convert.ImplicitConversions.{`map AsScalaConcurrentMap`, `map AsScala`}
+import java.util.concurrent.{ConcurrentNavigableMap, ConcurrentSkipListMap, CountDownLatch, TimeUnit}
+import scala.collection.convert.ImplicitConversions.{`map AsJavaMap`, `map AsScalaConcurrentMap`, `map AsScala`}
 
 class RmqStreamingSource(sqlContext: SQLContext, metadataPath: String, parameters: Map[String, String]) extends Source with Logging {
   private val prefetch: Long = parameters.getOrElse("rmq.fetchsize", "2001L").toLong
   private val readLimit: Long = parameters.getOrElse("rmq.maxbatchsize", "1000L").toLong
   private val queueName: String = parameters("rmq.queuename")
   private val fetchedCount: AtomicLong = new AtomicLong(0)
+  private val readTimeoutSecond: Long = parameters.getOrElse("rmq.readtimeout", "300L").toLong
 
-  val checkpointPath: String = PathUtil.convertToSystemPath(parameters.getOrDefault("rmq.offsetcheckpointpath", new URI(metadataPath).getPath))
+  private val checkpointPath: String = PathUtil.convertToSystemPath(parameters.getOrDefault("rmq.offsetcheckpointpath", new URI(metadataPath).getPath))
   private val customOffsetCheckpointPath = Paths.get(checkpointPath).resolve("customOffset")
   private val offsetManager: RmqOffsetManagerTrait = new RmqFileSystemRmqOffsetManager(customOffsetCheckpointPath)
+
   private val rmqEnv: Environment = RmqEnvironmentFactory.getEnvironment(parameters)
+  private val rmqRetryEnv: Environment = RmqEnvironmentFactory.getEnvironment(parameters)
+
   private val buffer: ConcurrentNavigableMap[Long, (Message, Context)] = new ConcurrentSkipListMap[Long, (Message, Context)]()
-  private val consumer: Consumer = startConsume(lastReadOffset + 1)
   @volatile private var lastReadOffset: Long = offsetManager.readLongFromFile().getOrElse(-1L)
+  private val consumer: Consumer = startConsume(lastReadOffset + 1)
 
   override def schema: StructType = RmqStreamingSchema.default
 
@@ -63,12 +66,54 @@ class RmqStreamingSource(sqlContext: SQLContext, metadataPath: String, parameter
   override def getBatch(start: Option[Offset], end: Offset): DataFrame = {
     val fromOffset: Long = start match {
       case Some(offset) => offset.json().toLong
-      case None => 0L
+      case None => -1L
     }
-    val endOffset: Long = end.json().toLong
-    lastReadOffset = endOffset
-    logDebug("processing from " + fromOffset + " to " + endOffset + " total " + (endOffset - fromOffset))
-    val subMap: ConcurrentNavigableMap[Long, (Message, Context)] = buffer.subMap(fromOffset, endOffset + 1)
+    val toOffset: Long = end.json().toLong
+
+    if (fromOffset < lastReadOffset) {
+      readAgainFromSource(fromOffset, toOffset) //should be a very rare case, expensive operator is acceptable
+    } else {
+      readFromBuffer(fromOffset, toOffset)
+    }
+  }
+
+  private def readAgainFromSource(fromOffset: Long, toOffset: Long) = {
+    log.error("cache missed, read again from: " + fromOffset + " to: " + toOffset + ". Huge performance impact if this happened frequently")
+    val latch: CountDownLatch = new CountDownLatch(1)
+    val tempBuffer: ConcurrentNavigableMap[Long, (Message, Context)] = new ConcurrentSkipListMap[Long, (Message, Context)]()
+    val tempConsumer = rmqRetryEnv.consumerBuilder()
+      .offset(OffsetSpecification.offset(fromOffset + 1))
+      .stream(queueName)
+      .flow()
+      .strategy(ConsumerFlowStrategy.creditOnProcessedMessageCount(1, 1))
+      .builder()
+      .messageHandler((context: Context, message: Message) => {
+        if (context.offset() <= toOffset) {
+          tempBuffer.put(context.offset(), (message, context))
+          context.processed()
+        } else {
+          latch.countDown()
+        }
+      })
+      .build()
+    latch.await(readTimeoutSecond, TimeUnit.SECONDS)
+    tempConsumer.close()
+    toInternalDf(tempBuffer)
+  }
+
+  // (fromOffset, toOffset]
+  private def readFromBuffer(fromOffset: Long, toOffset: Long) = {
+    logDebug("processing from " + fromOffset + " to " + toOffset + " total " + (toOffset - fromOffset))
+    val subMap: ConcurrentNavigableMap[Long, (Message, Context)] = buffer.subMap(fromOffset + 1, toOffset + 1)
+    val internalDf: DataFrame = toInternalDf(subMap)
+    lastReadOffset = toOffset
+    //gc immediately after read to internal df
+    fetchedCount.addAndGet(-1L * subMap.size().toLong)
+    subMap.clear()
+    internalDf
+  }
+
+  private def toInternalDf(subMap: ConcurrentNavigableMap[Long, (Message, Context)]) = {
     val internalRows = subMap.map(item => {
       val message: Message = item._2._1
       val context: Context = item._2._2
@@ -114,11 +159,6 @@ class RmqStreamingSource(sqlContext: SQLContext, metadataPath: String, parameter
     val endOffset: Long = end.json().toLong
     logDebug("committing :" + endOffset)
     offsetManager.saveLongToFile(endOffset)
-
-    //gc
-    val commitMsg = buffer.headMap(endOffset, true)
-    fetchedCount.addAndGet(-1L * commitMsg.size().toLong)
-    commitMsg.clear()
   }
 
   override def stop(): Unit = {
